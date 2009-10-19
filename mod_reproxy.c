@@ -904,9 +904,6 @@ SUBREQUEST_FUNC(mod_reproxy_subrequest) {
 
                     if (reproxy) {
                         buffer *reproxy_url = buffer_init_buffer(reproxy->value);
-                        /* remove reproxy header */
-                        buffer_reset(reproxy->value);
-                        array_replace(con->response.headers, reproxy);
 
                         /* ignore body */
                         chunkqueue_reset(con->write_queue);
@@ -938,6 +935,7 @@ SUBREQUEST_FUNC(mod_reproxy_subrequest) {
                         con->got_response = 0;
                         con->file_started = 0;
                         con->file_finished = 0;
+                        array_reset(con->response.headers);
 
                         if (p->conf.debug) {
                             log_error_write(srv, __FILE__, __LINE__,  "s",
