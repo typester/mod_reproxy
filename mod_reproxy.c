@@ -905,6 +905,22 @@ SUBREQUEST_FUNC(mod_reproxy_subrequest) {
                     if (reproxy) {
                         buffer *reproxy_url = buffer_init_buffer(reproxy->value);
 
+                        if (con->file_started == 1 && con->file_finished == 0) {
+                            if (con->mode != DIRECT) {
+                                plugin_data *d = p_d;
+
+                                for (i = 0; i < srv->plugins.used; i++) {
+                                    plugin *_p = ((plugin **)(srv->plugins.ptr))[i];
+                                    plugin_data *_p_data = _p->data;
+                                    if (_p_data && _p_data->id == d->id) {
+                                        if (_p->connection_reset) {
+                                            _p->connection_reset(srv, con, p_d);
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
                         /* ignore body */
                         chunkqueue_reset(con->write_queue);
 
