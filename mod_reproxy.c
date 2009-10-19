@@ -755,7 +755,7 @@ static handler_t proxy_write_request(server *srv, handler_ctx *hctx) {
 
             if (-1 == ret) {
                 if (errno != EAGAIN &&
-                    errno != EINTR) {
+                    errno != EINTR && errno != ENOTCONN) {
                     log_error_write(srv, __FILE__, __LINE__, "ssd",
                         "write failed:", strerror(errno), errno);
 
