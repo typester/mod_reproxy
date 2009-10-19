@@ -483,6 +483,9 @@ static int proxy_demux_response(server *srv, handler_ctx *hctx) {
                     !(con->parsed_response & HTTP_CONTENT_LENGTH)) {
                     con->response.transfer_encoding = HTTP_TRANSFER_ENCODING_CHUNKED;
                 }
+                else {
+                    con->response.transfer_encoding = HTTP_TRANSFER_ENCODING_IDENTITY;
+                }
 
                 con->file_started = 1;
                 if (blen) {
