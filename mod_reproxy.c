@@ -836,15 +836,16 @@ static int parse_url(server *srv, handler_ctx *hctx, buffer *url) {
         s = ++i;
         for (; i < url->used; i++) {
             if ('/' == url->ptr[i]) {
-                len = i - s;
-                char tmp[len + 1];
-                tmp[len + 1] = "\0";
-                memcpy(tmp, &(url->ptr[s]), len);
-
-                hctx->port = strtol(tmp, NULL, 10);
                 break;
             }
         }
+
+        len = i - s;
+        char tmp[len + 1];
+        tmp[len + 1] = "\0";
+        memcpy(tmp, &(url->ptr[s]), len);
+
+        hctx->port = strtol(tmp, NULL, 10);
         if (!hctx->port) hctx->port = 80;
     }
 
