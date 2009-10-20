@@ -36,6 +36,7 @@
 typedef struct {
     unsigned short debug;
     unsigned short enabled;
+    unsigned short streaming;
 } plugin_config;
 
 typedef struct {
@@ -158,6 +159,7 @@ SETDEFAULTS_FUNC(mod_reproxy_set_defaults) {
     config_values_t cv[] = {
         { "reproxy.enable", NULL, T_CONFIG_BOOLEAN, T_CONFIG_SCOPE_CONNECTION }, /* 0 */
         { "reproxy.debug",  NULL, T_CONFIG_BOOLEAN, T_CONFIG_SCOPE_CONNECTION }, /* 1 */
+        { "reproxy.streaming", NULL, T_CONFIG_BOOLEAN, T_CONFIG_SCOPE_CONNECTION }, /* 2 */
         { NULL,             NULL, T_CONFIG_UNSET,   T_CONFIG_SCOPE_UNSET }
     };
 
@@ -169,9 +171,11 @@ SETDEFAULTS_FUNC(mod_reproxy_set_defaults) {
         plugin_config *s;
 
         s = calloc(1, sizeof(plugin_config));
+        s->streaming = 1;
 
         cv[0].destination = &(s->enabled);
         cv[1].destination = &(s->debug);
+        cv[2].destination = &(s->streaming);
 
         p->config_storage[i] = s;
 
@@ -205,6 +209,7 @@ static int mod_reproxy_patch_connection(server *srv, connection *con, plugin_dat
 
     PATCH(enabled);
     PATCH(debug);
+    PATCH(streaming);
 
     /* skip the first, the global context */
     for (i = 1; i < srv->config_context->used; i++) {
@@ -223,6 +228,9 @@ static int mod_reproxy_patch_connection(server *srv, connection *con, plugin_dat
             }
             else if (buffer_is_equal_string(du->key, CONST_STR_LEN("reproxy.debug"))) {
                 PATCH(debug);
+            }
+            else if (buffer_is_equal_string(du->key, CONST_STR_LEN("reproxy.streaming"))) {
+                PATCH(streaming);
             }
         }
     }
@@ -468,6 +476,10 @@ static int proxy_demux_response(server *srv, handler_ctx *hctx) {
                     joblist_append(srv, con);
                 }
                 hctx->response->used = 0;
+
+                if (p->conf.streaming) {
+                    connection_set_state(srv, con, CON_STATE_RESPONSE_START);
+                }
             }
         } else {
             http_chunk_append_mem(srv, con, hctx->response->ptr, hctx->response->used);
@@ -769,7 +781,12 @@ static handler_t proxy_write_request(server *srv, handler_ctx *hctx) {
             return HANDLER_WAIT_FOR_EVENT;
         case PROXY_STATE_READ:
             /* waiting for a response */
-            return HANDLER_WAIT_FOR_EVENT;
+            if (con->file_started) {
+                return HANDLER_GO_ON;
+            }
+            else {
+                return HANDLER_WAIT_FOR_EVENT;
+            }
         default:
             log_error_write(srv, __FILE__, __LINE__, "s", "(debug) unknown state");
             return HANDLER_ERROR;
