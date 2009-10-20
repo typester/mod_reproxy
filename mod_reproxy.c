@@ -238,30 +238,6 @@ static int proxy_set_state(server *srv, handler_ctx *hctx, proxy_connection_stat
     return 0;
 }
 
-static void proxy_set_header(connection *con, const char *key, const char *value) {
-    data_string *ds_dst;
-
-    if (NULL == (ds_dst = (data_string *)array_get_unused_element(con->request.headers, TYPE_STRING))) {
-          ds_dst = data_string_init();
-    }
-
-    buffer_copy_string(ds_dst->key, key);
-    buffer_copy_string(ds_dst->value, value);
-    array_insert_unique(con->request.headers, (data_unset *)ds_dst);
-}
-
-static void proxy_append_header(connection *con, const char *key, const char *value) {
-    data_string *ds_dst;
-
-    if (NULL == (ds_dst = (data_string *)array_get_unused_element(con->request.headers, TYPE_STRING))) {
-          ds_dst = data_string_init();
-    }
-
-    buffer_copy_string(ds_dst->key, key);
-    buffer_append_string(ds_dst->value, value);
-    array_insert_unique(con->request.headers, (data_unset *)ds_dst);
-}
-
 static int proxy_create_env(server *srv, handler_ctx *hctx) {
     size_t i;
 
