@@ -516,7 +516,7 @@ static handler_t proxy_handle_fdevent(void *s, void *ctx, int revents) {
                     /* nothing has been send out yet, send a 500 */
                     connection_set_state(srv, con, CON_STATE_HANDLE_REQUEST);
                     con->http_status = 500;
-                    //con->mode = DIRECT;
+                    con->mode = DIRECT;
                 } else {
                     /* response might have been already started, kill the connection */
                     connection_set_state(srv, con, CON_STATE_ERROR);
@@ -553,10 +553,10 @@ static handler_t proxy_handle_fdevent(void *s, void *ctx, int revents) {
                     "establishing connection failed:", strerror(socket_error),
                     "port:", hctx->port);
 
-                con->http_status = 500;
+                con->http_status = 503;
             }
 
-            if (500 == con->http_status) {
+            if (500 <= con->http_status) {
                 con->mode = DIRECT;
                 connection_set_state(srv, con, CON_STATE_HANDLE_REQUEST);
                 joblist_append(srv, con);
@@ -602,7 +602,7 @@ static handler_t proxy_handle_fdevent(void *s, void *ctx, int revents) {
             joblist_append(srv, con);
 
             con->http_status = 503;
-            //con->mode = DIRECT;
+            con->mode = DIRECT;
 
             return HANDLER_FINISHED;
         }
@@ -787,7 +787,11 @@ static handler_t mod_reproxy_proxy_handler(server *srv, handler_ctx *hctx) {
     switch (proxy_write_request(srv, hctx)) {
         case HANDLER_ERROR:
             proxy_connection_close(srv, hctx);
-            return HANDLER_ERROR;
+
+            hctx->remote_conn->http_status = 500;
+            hctx->remote_conn->mode = DIRECT;
+
+            return HANDLER_COMEBACK;
 
         case HANDLER_WAIT_FOR_EVENT:
             return HANDLER_WAIT_FOR_EVENT;
