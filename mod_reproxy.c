@@ -873,6 +873,18 @@ static int parse_url(server *srv, handler_ctx *hctx, buffer *url) {
     }
 }
 
+static void mod_reproxy_reset_response(connection *con) {
+    con->http_status = 0;
+    con->file_finished = 0;
+    con->file_started = 0;
+    con->got_response = 0;
+    con->parsed_response = 0;
+    con->response.content_length = -1;
+    con->response.transfer_encoding = 0;
+    array_reset(con->response.headers);
+    chunkqueue_reset(con->write_queue);
+}
+
 SUBREQUEST_FUNC(mod_reproxy_subrequest) {
     size_t i;
     plugin_data *p;
@@ -908,6 +920,8 @@ SUBREQUEST_FUNC(mod_reproxy_subrequest) {
                     if (reproxy) {
                         buffer *reproxy_url = buffer_init_buffer(reproxy->value);
 
+                        /* if other plugin is still working, reset it
+                           mod_cgi sometimes do this. */
                         if (con->file_started == 1 && con->file_finished == 0) {
                             if (con->mode != DIRECT) {
                                 plugin_data *d = p_d;
@@ -924,21 +938,19 @@ SUBREQUEST_FUNC(mod_reproxy_subrequest) {
                             }
                         }
 
-                        /* ignore body */
-                        chunkqueue_reset(con->write_queue);
+                        /* reset response */
+                        mod_reproxy_reset_response(con);
 
                         hctx = handler_ctx_init();
                         if (0 != parse_url(srv, hctx, reproxy_url)) {
-                            buffer_free(reproxy_url);
-
                             log_error_write(srv, __FILE__, __LINE__,  "sb",
                                 "invalid url:", reproxy_url);
+                            buffer_free(reproxy_url);
 
                             con->http_status = 500;
                             con->mode = DIRECT;
-                            connection_set_state(srv, con, CON_STATE_HANDLE_REQUEST);
 
-                            return r;
+                            return HANDLER_COMEBACK;
                         }
                         buffer_free(reproxy_url);
 
@@ -946,15 +958,6 @@ SUBREQUEST_FUNC(mod_reproxy_subrequest) {
                         hctx->plugin_data = p;
 
                         con->plugin_ctx[ p->id ] = hctx;
-
-                        array_reset(con->response.headers);
-                        connection_set_state(srv, con, CON_STATE_HANDLE_REQUEST);
-
-                        con->parsed_response = 0;
-                        con->got_response = 0;
-                        con->file_started = 0;
-                        con->file_finished = 0;
-                        array_reset(con->response.headers);
 
                         if (p->conf.debug) {
                             log_error_write(srv, __FILE__, __LINE__,  "s",
