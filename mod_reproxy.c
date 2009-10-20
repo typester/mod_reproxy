@@ -257,7 +257,7 @@ static int proxy_create_env(server *srv, handler_ctx *hctx) {
     buffer_append_string_buffer(b, hctx->host);
     buffer_append_string_len(b, CONST_STR_LEN("\r\n"));
 
-    buffer_append_string_len(b, CONST_STR_LEN("Connection: clone\r\n"));
+    buffer_append_string_len(b, CONST_STR_LEN("Connection: close\r\n"));
     buffer_append_string_len(b, CONST_STR_LEN("User-Agent: mod_reproxy ("));
     if (buffer_is_empty(con->conf.server_tag)) {
         buffer_append_string_len(b, CONST_STR_LEN(PACKAGE_DESC));
@@ -560,7 +560,7 @@ static handler_t proxy_handle_fdevent(void *s, void *ctx, int revents) {
                 con->mode = DIRECT;
                 connection_set_state(srv, con, CON_STATE_HANDLE_REQUEST);
                 joblist_append(srv, con);
-                return HANDLER_ERROR;
+                return HANDLER_FINISHED;
             }
 
             if (p->conf.debug) {
@@ -802,7 +802,7 @@ static handler_t mod_reproxy_proxy_handler(server *srv, handler_ctx *hctx) {
 
 static int parse_url(server *srv, handler_ctx *hctx, buffer *url) {
     size_t i = 0;
-    size_t s, len;
+    int s, len;
 
     if (0 == strncmp(url->ptr, "http://", sizeof("http://") - 1)) {
         i += sizeof("http://") - 1;
@@ -819,34 +819,34 @@ static int parse_url(server *srv, handler_ctx *hctx, buffer *url) {
             if ('/' == url->ptr[i]) {
                 hctx->port = 80;
             }
-
-            len = i - s;
-            if (len > 0) {
-                buffer_append_string_len(hctx->host, &(url->ptr[s]), len);
-            }
             break;
         }
+    }
+    len = i - s;
+    if (len > 0) {
+        buffer_append_string_len(hctx->host, &(url->ptr[s]), len);
     }
 
     /* port */
     if (!hctx->port) {
-        s = i;
+        s = ++i;
         for (; i < url->used; i++) {
             if ('/' == url->ptr[i]) {
                 len = i - s;
                 char tmp[len + 1];
                 tmp[len + 1] = "\0";
-                memcpy(tmp, url->ptr[s], len);
+                memcpy(tmp, &(url->ptr[s]), len);
 
                 hctx->port = strtol(tmp, NULL, 10);
+                break;
             }
-            break;
         }
+        if (!hctx->port) hctx->port = 80;
     }
 
     /* path */
     s   = i;
-    len = (url->used - 1) - s;
+    len = (url->used-1) - s;
     if (len <= 0) {
         buffer_append_string( hctx->path, "/" );
     }
