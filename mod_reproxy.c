@@ -239,10 +239,10 @@ static int proxy_set_state(server *srv, handler_ctx *hctx, proxy_connection_stat
 }
 
 static int proxy_create_env(server *srv, handler_ctx *hctx) {
-    size_t i;
-
     connection *con   = hctx->remote_conn;
     buffer *b;
+
+    UNUSED(srv);
 
     /* build header */
     b = chunkqueue_get_append_buffer(hctx->wb);
@@ -674,7 +674,6 @@ static int proxy_establish_connection(server *srv, handler_ctx *hctx) {
 }
 
 static handler_t proxy_write_request(server *srv, handler_ctx *hctx) {
-    plugin_data *p  = hctx->plugin_data;
     connection *con = hctx->remote_conn;
 
     int ret;
@@ -808,6 +807,8 @@ static int parse_url(server *srv, handler_ctx *hctx, buffer *url) {
     size_t i = 0;
     int s, len;
 
+    UNUSED(srv);
+
     if (0 == strncmp(url->ptr, "http://", sizeof("http://") - 1)) {
         i += sizeof("http://") - 1;
     }
@@ -842,7 +843,7 @@ static int parse_url(server *srv, handler_ctx *hctx, buffer *url) {
 
         len = i - s;
         char tmp[len + 1];
-        tmp[len + 1] = "\0";
+        tmp[len + 1] = 0;
         memcpy(tmp, &(url->ptr[s]), len);
 
         hctx->port = strtol(tmp, NULL, 10);
@@ -880,8 +881,9 @@ static void mod_reproxy_reset_response(connection *con) {
 }
 
 SUBREQUEST_FUNC(mod_reproxy_subrequest) {
+    plugin_data *p = NULL;
     size_t i;
-    plugin_data *p;
+    handler_t r;
 
     for (i = 0; i < srv->plugins.used; i++) {
         plugin *_p = ((plugin **)(srv->plugins.ptr))[i];
@@ -895,13 +897,13 @@ SUBREQUEST_FUNC(mod_reproxy_subrequest) {
     handler_ctx *hctx = con->plugin_ctx[p->id];
     if (hctx) {
         /* my job */
-        handler_t r = mod_reproxy_proxy_handler(srv, hctx);
+        r = mod_reproxy_proxy_handler(srv, hctx);
         return r;
     }
 
     plugin_handler_subrequest handler = p->original_handler[ con->mode ];
     if (handler) {
-        handler_t r = handler(srv, con, p_d);
+        r = handler(srv, con, p_d);
 
         mod_reproxy_patch_connection(srv, con, p);
         if (p->conf.enabled) {
@@ -964,11 +966,13 @@ SUBREQUEST_FUNC(mod_reproxy_subrequest) {
                                 "  path:", hctx->path);
                         }
 
-                        handler_t r = mod_reproxy_proxy_handler(srv, hctx);
+                        r = mod_reproxy_proxy_handler(srv, hctx);
                         return r;
                     }
                 }
                 break;
+                default:
+                    break;
             }
         }
 
