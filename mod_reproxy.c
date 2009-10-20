@@ -51,7 +51,6 @@ typedef struct {
 typedef enum {
     PROXY_STATE_INIT,
     PROXY_STATE_CONNECT,
-    PROXY_STATE_CONNECT_DELAY,
     PROXY_STATE_PREPARE_WRITE,
     PROXY_STATE_WRITE,
     PROXY_STATE_READ,
@@ -558,8 +557,44 @@ static handler_t proxy_handle_fdevent(void *s, void *ctx, int revents) {
                 "proxy: fdevent-out", hctx->state);
         }
 
-        if (hctx->state == PROXY_STATE_CONNECT ||
-            hctx->state == PROXY_STATE_WRITE) {
+        if (hctx->state == PROXY_STATE_CONNECT) {
+            int socket_error;
+            socklen_t socket_error_len = sizeof(socket_error);
+
+            /* we don't need it anymore */
+            fdevent_event_del(srv->ev, &(hctx->fde_ndx), hctx->fd);
+
+            /* try to finish the connect() */
+            if (0 != getsockopt(hctx->fd, SOL_SOCKET, SO_ERROR,
+                    &socket_error, &socket_error_len)) {
+                log_error_write(srv, __FILE__, __LINE__, "ss",
+                    "getsockopt failed:", strerror(errno));
+
+                con->http_status = 500;
+            }
+            if (socket_error != 0) {
+                log_error_write(srv, __FILE__, __LINE__, "ss",
+                    "establishing connection failed:", strerror(socket_error),
+                    "port:", hctx->port);
+
+                con->http_status = 500;
+            }
+
+            if (500 == con->http_status) {
+                con->mode = DIRECT;
+                connection_set_state(srv, con, CON_STATE_HANDLE_REQUEST);
+                joblist_append(srv, con);
+                return HANDLER_ERROR;
+            }
+
+            if (p->conf.debug) {
+                log_error_write(srv, __FILE__, __LINE__,  "s",
+                    "proxy - connect - delayed success");
+            }
+            proxy_set_state(srv, hctx, PROXY_STATE_PREPARE_WRITE);
+            return mod_reproxy_proxy_handler(srv, hctx);
+        }
+        else if (hctx->state == PROXY_STATE_WRITE) {
             /* we are allowed to send something out
              *
              * 1. in a unfinished connect() call
@@ -713,31 +748,9 @@ static handler_t proxy_write_request(server *srv, handler_ctx *hctx) {
                         break;
                 }
             } else {
-                int socket_error;
-                socklen_t socket_error_len = sizeof(socket_error);
-
-                /* we don't need it anymore */
-                fdevent_event_del(srv->ev, &(hctx->fde_ndx), hctx->fd);
-
-                /* try to finish the connect() */
-                if (0 != getsockopt(hctx->fd, SOL_SOCKET, SO_ERROR,
-                        &socket_error, &socket_error_len)) {
-                    log_error_write(srv, __FILE__, __LINE__, "ss",
-                        "getsockopt failed:", strerror(errno));
-
-                    return HANDLER_ERROR;
-                }
-                if (socket_error != 0) {
-                    log_error_write(srv, __FILE__, __LINE__, "ss",
-                        "establishing connection failed:", strerror(socket_error),
-                        "port:", hctx->port);
-
-                    return HANDLER_ERROR;
-                }
-                if (p->conf.debug) {
-                    log_error_write(srv, __FILE__, __LINE__,  "s",
-                        "proxy - connect - delayed success");
-                }
+                fdevent_event_add(srv->ev, &(hctx->fde_ndx),
+                    hctx->fd, FDEVENT_OUT);
+                return HANDLER_WAIT_FOR_EVENT;
             }
 
             proxy_set_state(srv, hctx, PROXY_STATE_PREPARE_WRITE);
@@ -755,7 +768,7 @@ static handler_t proxy_write_request(server *srv, handler_ctx *hctx) {
 
             if (-1 == ret) {
                 if (errno != EAGAIN &&
-                    errno != EINTR && errno != ENOTCONN) {
+                    errno != EINTR) {
                     log_error_write(srv, __FILE__, __LINE__, "ssd",
                         "write failed:", strerror(errno), errno);
 
