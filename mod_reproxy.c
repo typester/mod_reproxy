@@ -51,7 +51,6 @@ typedef struct {
 typedef enum {
     PROXY_STATE_INIT,
     PROXY_STATE_CONNECT,
-    PROXY_STATE_CONNECT_DELAY,
     PROXY_STATE_PREPARE_WRITE,
     PROXY_STATE_WRITE,
     PROXY_STATE_READ,
@@ -76,6 +75,8 @@ typedef struct {
 
     connection *remote_conn;    /* dump pointer */
     plugin_data *plugin_data;   /* dump pointer */
+
+    int wait_write_ready;
 } handler_ctx;
 
 static handler_ctx * handler_ctx_init() {
@@ -541,7 +542,7 @@ static handler_t proxy_handle_fdevent(void *s, void *ctx, int revents) {
                     /* nothing has been send out yet, send a 500 */
                     connection_set_state(srv, con, CON_STATE_HANDLE_REQUEST);
                     con->http_status = 500;
-                    //con->mode = DIRECT;
+                    con->mode = DIRECT;
                 } else {
                     /* response might have been already started, kill the connection */
                     connection_set_state(srv, con, CON_STATE_ERROR);
@@ -565,6 +566,7 @@ static handler_t proxy_handle_fdevent(void *s, void *ctx, int revents) {
              * 1. in a unfinished connect() call
              * 2. in a unfinished write() call (long POST request)
              */
+            hctx->wait_write_ready = 0;
             return mod_reproxy_proxy_handler(srv, hctx);
         } else {
             log_error_write(srv, __FILE__, __LINE__, "sd",
@@ -586,12 +588,14 @@ static handler_t proxy_handle_fdevent(void *s, void *ctx, int revents) {
              * what is proxy is doing if it can't reach the next hop ?
              *
              */
+            log_error_write(srv, __FILE__, __LINE__, "sbsd",
+                "proxy: cannot connect host:", hctx->host, "port:", hctx->port);
 
             proxy_connection_close(srv, hctx);
             joblist_append(srv, con);
 
             con->http_status = 503;
-            //con->mode = DIRECT;
+            con->mode = DIRECT;
 
             return HANDLER_FINISHED;
         }
@@ -702,6 +706,8 @@ static handler_t proxy_write_request(server *srv, handler_ctx *hctx) {
                         fdevent_event_add(srv->ev, &(hctx->fde_ndx),
                                           hctx->fd, FDEVENT_OUT);
 
+                        hctx->wait_write_ready = 1;
+
                         return HANDLER_WAIT_FOR_EVENT;
                     case -1:
                         /* if ECONNREFUSED choose another connection -> FIXME */
@@ -713,6 +719,9 @@ static handler_t proxy_write_request(server *srv, handler_ctx *hctx) {
                         break;
                 }
             } else {
+                if (hctx->wait_write_ready)
+                    return HANDLER_WAIT_FOR_EVENT;
+
                 int socket_error;
                 socklen_t socket_error_len = sizeof(socket_error);
 
@@ -725,7 +734,7 @@ static handler_t proxy_write_request(server *srv, handler_ctx *hctx) {
                     log_error_write(srv, __FILE__, __LINE__, "ss",
                         "getsockopt failed:", strerror(errno));
 
-                    return HANDLER_ERROR;
+                        return HANDLER_ERROR;
                 }
                 if (socket_error != 0) {
                     log_error_write(srv, __FILE__, __LINE__, "ss",
@@ -755,7 +764,7 @@ static handler_t proxy_write_request(server *srv, handler_ctx *hctx) {
 
             if (-1 == ret) {
                 if (errno != EAGAIN &&
-                    errno != EINTR && errno != ENOTCONN) {
+                    errno != EINTR) {
                     log_error_write(srv, __FILE__, __LINE__, "ssd",
                         "write failed:", strerror(errno), errno);
 
@@ -797,8 +806,11 @@ static handler_t mod_reproxy_proxy_handler(server *srv, handler_ctx *hctx) {
 
     switch (proxy_write_request(srv, hctx)) {
         case HANDLER_ERROR:
+            hctx->remote_conn->http_status = 500;
+            hctx->remote_conn->mode = DIRECT;
+
             proxy_connection_close(srv, hctx);
-            return HANDLER_ERROR;
+            return HANDLER_COMEBACK;
 
         case HANDLER_WAIT_FOR_EVENT:
             return HANDLER_WAIT_FOR_EVENT;
