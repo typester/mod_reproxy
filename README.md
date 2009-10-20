@@ -46,6 +46,13 @@ FAQ
   * No. Because lighttpd 1.5 has already same feature known as `X-Rewrite-*`
 
 
+LIMITATION
+----------
+
+* No ipv6 support
+* No SSL support
+* No HTTP/1.1 support
+
 LICENSE
 -------
 
