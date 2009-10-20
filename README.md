@@ -52,6 +52,7 @@ LIMITATION
 * No ipv6 support
 * No SSL support
 * No HTTP/1.1 support
+* *No streaming support (Let's wait 1.5!)*
 
 LICENSE
 -------
