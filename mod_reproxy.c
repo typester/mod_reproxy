@@ -51,7 +51,6 @@ typedef struct {
 typedef enum {
     PROXY_STATE_INIT,
     PROXY_STATE_CONNECT,
-    PROXY_STATE_CONNECT_DELAY,
     PROXY_STATE_PREPARE_WRITE,
     PROXY_STATE_WRITE,
     PROXY_STATE_READ,
@@ -239,35 +238,11 @@ static int proxy_set_state(server *srv, handler_ctx *hctx, proxy_connection_stat
     return 0;
 }
 
-static void proxy_set_header(connection *con, const char *key, const char *value) {
-    data_string *ds_dst;
-
-    if (NULL == (ds_dst = (data_string *)array_get_unused_element(con->request.headers, TYPE_STRING))) {
-          ds_dst = data_string_init();
-    }
-
-    buffer_copy_string(ds_dst->key, key);
-    buffer_copy_string(ds_dst->value, value);
-    array_insert_unique(con->request.headers, (data_unset *)ds_dst);
-}
-
-static void proxy_append_header(connection *con, const char *key, const char *value) {
-    data_string *ds_dst;
-
-    if (NULL == (ds_dst = (data_string *)array_get_unused_element(con->request.headers, TYPE_STRING))) {
-          ds_dst = data_string_init();
-    }
-
-    buffer_copy_string(ds_dst->key, key);
-    buffer_append_string(ds_dst->value, value);
-    array_insert_unique(con->request.headers, (data_unset *)ds_dst);
-}
-
 static int proxy_create_env(server *srv, handler_ctx *hctx) {
-    size_t i;
-
     connection *con   = hctx->remote_conn;
     buffer *b;
+
+    UNUSED(srv);
 
     /* build header */
     b = chunkqueue_get_append_buffer(hctx->wb);
@@ -282,7 +257,7 @@ static int proxy_create_env(server *srv, handler_ctx *hctx) {
     buffer_append_string_buffer(b, hctx->host);
     buffer_append_string_len(b, CONST_STR_LEN("\r\n"));
 
-    buffer_append_string_len(b, CONST_STR_LEN("Connection: clone\r\n"));
+    buffer_append_string_len(b, CONST_STR_LEN("Connection: close\r\n"));
     buffer_append_string_len(b, CONST_STR_LEN("User-Agent: mod_reproxy ("));
     if (buffer_is_empty(con->conf.server_tag)) {
         buffer_append_string_len(b, CONST_STR_LEN(PACKAGE_DESC));
@@ -541,7 +516,7 @@ static handler_t proxy_handle_fdevent(void *s, void *ctx, int revents) {
                     /* nothing has been send out yet, send a 500 */
                     connection_set_state(srv, con, CON_STATE_HANDLE_REQUEST);
                     con->http_status = 500;
-                    //con->mode = DIRECT;
+                    con->mode = DIRECT;
                 } else {
                     /* response might have been already started, kill the connection */
                     connection_set_state(srv, con, CON_STATE_ERROR);
@@ -558,8 +533,44 @@ static handler_t proxy_handle_fdevent(void *s, void *ctx, int revents) {
                 "proxy: fdevent-out", hctx->state);
         }
 
-        if (hctx->state == PROXY_STATE_CONNECT ||
-            hctx->state == PROXY_STATE_WRITE) {
+        if (hctx->state == PROXY_STATE_CONNECT) {
+            int socket_error;
+            socklen_t socket_error_len = sizeof(socket_error);
+
+            /* we don't need it anymore */
+            fdevent_event_del(srv->ev, &(hctx->fde_ndx), hctx->fd);
+
+            /* try to finish the connect() */
+            if (0 != getsockopt(hctx->fd, SOL_SOCKET, SO_ERROR,
+                    &socket_error, &socket_error_len)) {
+                log_error_write(srv, __FILE__, __LINE__, "ss",
+                    "getsockopt failed:", strerror(errno));
+
+                con->http_status = 500;
+            }
+            if (socket_error != 0) {
+                log_error_write(srv, __FILE__, __LINE__, "ss",
+                    "establishing connection failed:", strerror(socket_error),
+                    "port:", hctx->port);
+
+                con->http_status = 503;
+            }
+
+            if (500 <= con->http_status) {
+                con->mode = DIRECT;
+                connection_set_state(srv, con, CON_STATE_HANDLE_REQUEST);
+                joblist_append(srv, con);
+                return HANDLER_FINISHED;
+            }
+
+            if (p->conf.debug) {
+                log_error_write(srv, __FILE__, __LINE__,  "s",
+                    "proxy - connect - delayed success");
+            }
+            proxy_set_state(srv, hctx, PROXY_STATE_PREPARE_WRITE);
+            return mod_reproxy_proxy_handler(srv, hctx);
+        }
+        else if (hctx->state == PROXY_STATE_WRITE) {
             /* we are allowed to send something out
              *
              * 1. in a unfinished connect() call
@@ -591,7 +602,7 @@ static handler_t proxy_handle_fdevent(void *s, void *ctx, int revents) {
             joblist_append(srv, con);
 
             con->http_status = 503;
-            //con->mode = DIRECT;
+            con->mode = DIRECT;
 
             return HANDLER_FINISHED;
         }
@@ -663,7 +674,6 @@ static int proxy_establish_connection(server *srv, handler_ctx *hctx) {
 }
 
 static handler_t proxy_write_request(server *srv, handler_ctx *hctx) {
-    plugin_data *p  = hctx->plugin_data;
     connection *con = hctx->remote_conn;
 
     int ret;
@@ -713,31 +723,9 @@ static handler_t proxy_write_request(server *srv, handler_ctx *hctx) {
                         break;
                 }
             } else {
-                int socket_error;
-                socklen_t socket_error_len = sizeof(socket_error);
-
-                /* we don't need it anymore */
-                fdevent_event_del(srv->ev, &(hctx->fde_ndx), hctx->fd);
-
-                /* try to finish the connect() */
-                if (0 != getsockopt(hctx->fd, SOL_SOCKET, SO_ERROR,
-                        &socket_error, &socket_error_len)) {
-                    log_error_write(srv, __FILE__, __LINE__, "ss",
-                        "getsockopt failed:", strerror(errno));
-
-                    return HANDLER_ERROR;
-                }
-                if (socket_error != 0) {
-                    log_error_write(srv, __FILE__, __LINE__, "ss",
-                        "establishing connection failed:", strerror(socket_error),
-                        "port:", hctx->port);
-
-                    return HANDLER_ERROR;
-                }
-                if (p->conf.debug) {
-                    log_error_write(srv, __FILE__, __LINE__,  "s",
-                        "proxy - connect - delayed success");
-                }
+                fdevent_event_add(srv->ev, &(hctx->fde_ndx),
+                    hctx->fd, FDEVENT_OUT);
+                return HANDLER_WAIT_FOR_EVENT;
             }
 
             proxy_set_state(srv, hctx, PROXY_STATE_PREPARE_WRITE);
@@ -755,7 +743,7 @@ static handler_t proxy_write_request(server *srv, handler_ctx *hctx) {
 
             if (-1 == ret) {
                 if (errno != EAGAIN &&
-                    errno != EINTR && errno != ENOTCONN) {
+                    errno != EINTR) {
                     log_error_write(srv, __FILE__, __LINE__, "ssd",
                         "write failed:", strerror(errno), errno);
 
@@ -798,7 +786,11 @@ static handler_t mod_reproxy_proxy_handler(server *srv, handler_ctx *hctx) {
     switch (proxy_write_request(srv, hctx)) {
         case HANDLER_ERROR:
             proxy_connection_close(srv, hctx);
-            return HANDLER_ERROR;
+
+            hctx->remote_conn->http_status = 500;
+            hctx->remote_conn->mode = DIRECT;
+
+            return HANDLER_COMEBACK;
 
         case HANDLER_WAIT_FOR_EVENT:
             return HANDLER_WAIT_FOR_EVENT;
@@ -813,7 +805,9 @@ static handler_t mod_reproxy_proxy_handler(server *srv, handler_ctx *hctx) {
 
 static int parse_url(server *srv, handler_ctx *hctx, buffer *url) {
     size_t i = 0;
-    size_t s, len;
+    int s, len;
+
+    UNUSED(srv);
 
     if (0 == strncmp(url->ptr, "http://", sizeof("http://") - 1)) {
         i += sizeof("http://") - 1;
@@ -830,34 +824,35 @@ static int parse_url(server *srv, handler_ctx *hctx, buffer *url) {
             if ('/' == url->ptr[i]) {
                 hctx->port = 80;
             }
-
-            len = i - s;
-            if (len > 0) {
-                buffer_append_string_len(hctx->host, &(url->ptr[s]), len);
-            }
             break;
         }
+    }
+    len = i - s;
+    if (len > 0) {
+        buffer_append_string_len(hctx->host, &(url->ptr[s]), len);
     }
 
     /* port */
     if (!hctx->port) {
-        s = i;
+        s = ++i;
         for (; i < url->used; i++) {
             if ('/' == url->ptr[i]) {
-                len = i - s;
-                char tmp[len + 1];
-                tmp[len + 1] = "\0";
-                memcpy(tmp, url->ptr[s], len);
-
-                hctx->port = strtol(tmp, NULL, 10);
+                break;
             }
-            break;
         }
+
+        len = i - s;
+        char tmp[len + 1];
+        tmp[len + 1] = 0;
+        memcpy(tmp, &(url->ptr[s]), len);
+
+        hctx->port = strtol(tmp, NULL, 10);
+        if (!hctx->port) hctx->port = 80;
     }
 
     /* path */
     s   = i;
-    len = (url->used - 1) - s;
+    len = (url->used-1) - s;
     if (len <= 0) {
         buffer_append_string( hctx->path, "/" );
     }
@@ -886,8 +881,9 @@ static void mod_reproxy_reset_response(connection *con) {
 }
 
 SUBREQUEST_FUNC(mod_reproxy_subrequest) {
+    plugin_data *p = NULL;
     size_t i;
-    plugin_data *p;
+    handler_t r;
 
     for (i = 0; i < srv->plugins.used; i++) {
         plugin *_p = ((plugin **)(srv->plugins.ptr))[i];
@@ -901,13 +897,13 @@ SUBREQUEST_FUNC(mod_reproxy_subrequest) {
     handler_ctx *hctx = con->plugin_ctx[p->id];
     if (hctx) {
         /* my job */
-        handler_t r = mod_reproxy_proxy_handler(srv, hctx);
+        r = mod_reproxy_proxy_handler(srv, hctx);
         return r;
     }
 
     plugin_handler_subrequest handler = p->original_handler[ con->mode ];
     if (handler) {
-        handler_t r = handler(srv, con, p_d);
+        r = handler(srv, con, p_d);
 
         mod_reproxy_patch_connection(srv, con, p);
         if (p->conf.enabled) {
@@ -970,11 +966,13 @@ SUBREQUEST_FUNC(mod_reproxy_subrequest) {
                                 "  path:", hctx->path);
                         }
 
-                        handler_t r = mod_reproxy_proxy_handler(srv, hctx);
+                        r = mod_reproxy_proxy_handler(srv, hctx);
                         return r;
                     }
                 }
                 break;
+                default:
+                    break;
             }
         }
 
