@@ -39,6 +39,19 @@ And insert following line to the scope where you want to use X-Reproxy-URL:
 In this scope, you can use `X-Reproxy-URL` header in any other module that use subrequest. (ex: mod_cgi, mod_fastcgi, mod_proxy, and etc)
 
 
+Configuration
+-------------
+
+All configuration options are boolean. "enable" | "diable"
+
+* reproxy.enable
+  * enable `X-Reproxy-URL` (default "disable")
+* reproxy.streaming
+  * enable response streaming, don't cache whole content data in memory (default: "enable")
+* reproxy.debug
+  * enable debug output (default "disable")
+
+
 FAQ
 ---
 
