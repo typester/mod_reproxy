@@ -32,11 +32,22 @@
 #define data_proxy data_fastcgi
 #define data_proxy_init data_fastcgi_init
 
+static data_unset *data_string_copy(const data_unset *s) {
+	data_string *src = (data_string *)s;
+	data_string *ds = data_string_init();
+
+	buffer_copy_string_buffer(ds->key, src->key);
+	buffer_copy_string_buffer(ds->value, src->value);
+	ds->is_index_key = src->is_index_key;
+	return (data_unset *)ds;
+}
+
 /* plugin config for all request/connections */
 typedef struct {
     unsigned short debug;
     unsigned short enabled;
     unsigned short streaming;
+    array *keep_headers;
 } plugin_config;
 
 typedef struct {
@@ -68,6 +79,7 @@ typedef struct {
 
     buffer *response;
     buffer *response_header;
+    array *keep_headers;
 
     chunkqueue *wb;
 
@@ -89,6 +101,7 @@ static handler_ctx * handler_ctx_init() {
 
     hctx->response = buffer_init();
     hctx->response_header = buffer_init();
+    hctx->keep_headers = array_init();
     hctx->wb = chunkqueue_init();
 
     hctx->fd = -1;
@@ -103,6 +116,7 @@ static void handler_ctx_free(handler_ctx *hctx) {
 
     buffer_free(hctx->response);
     buffer_free(hctx->response_header);
+    array_free(hctx->keep_headers);
     chunkqueue_free(hctx->wb);
 
     free(hctx);
@@ -135,6 +149,8 @@ FREE_FUNC(mod_reproxy_free) {
             plugin_config *s = p->config_storage[i];
 
             if (!s) continue;
+
+            array_free(s->keep_headers);
             free(s);
         }
         free(p->config_storage);
@@ -160,6 +176,7 @@ SETDEFAULTS_FUNC(mod_reproxy_set_defaults) {
         { "reproxy.enable", NULL, T_CONFIG_BOOLEAN, T_CONFIG_SCOPE_CONNECTION }, /* 0 */
         { "reproxy.debug",  NULL, T_CONFIG_BOOLEAN, T_CONFIG_SCOPE_CONNECTION }, /* 1 */
         { "reproxy.streaming", NULL, T_CONFIG_BOOLEAN, T_CONFIG_SCOPE_CONNECTION }, /* 2 */
+        { "reproxy.keep-headers", NULL, T_CONFIG_ARRAY, T_CONFIG_SCOPE_CONNECTION }, /* 3 */
         { NULL,             NULL, T_CONFIG_UNSET,   T_CONFIG_SCOPE_UNSET }
     };
 
@@ -172,10 +189,12 @@ SETDEFAULTS_FUNC(mod_reproxy_set_defaults) {
 
         s = calloc(1, sizeof(plugin_config));
         s->streaming = 1;
+        s->keep_headers = array_init();
 
         cv[0].destination = &(s->enabled);
         cv[1].destination = &(s->debug);
         cv[2].destination = &(s->streaming);
+        cv[3].destination = s->keep_headers;
 
         p->config_storage[i] = s;
 
@@ -210,6 +229,7 @@ static int mod_reproxy_patch_connection(server *srv, connection *con, plugin_dat
     PATCH(enabled);
     PATCH(debug);
     PATCH(streaming);
+    PATCH(keep_headers);
 
     /* skip the first, the global context */
     for (i = 1; i < srv->config_context->used; i++) {
@@ -231,6 +251,9 @@ static int mod_reproxy_patch_connection(server *srv, connection *con, plugin_dat
             }
             else if (buffer_is_equal_string(du->key, CONST_STR_LEN("reproxy.streaming"))) {
                 PATCH(streaming);
+            }
+            else if (buffer_is_equal_string(du->key, CONST_STR_LEN("reproxy.keep-headers"))) {
+                PATCH(keep_headers);
             }
         }
     }
@@ -304,6 +327,8 @@ static void proxy_connection_close(server *srv, handler_ctx *hctx) {
 static int proxy_response_parse(server *srv, connection *con, plugin_data *p, buffer *in) {
     char *s, *ns;
     int http_response_status = -1;
+    handler_ctx *hctx = con->plugin_ctx[p->id];
+    int i;
 
     UNUSED(srv);
 
@@ -383,10 +408,19 @@ static int proxy_response_parse(server *srv, connection *con, plugin_data *p, bu
                 ds = data_response_init();
             }
             buffer_copy_string_len(ds->key, key, key_len);
-            buffer_copy_string(ds->value, value);
 
-            array_insert_unique(con->response.headers, (data_unset *)ds);
+            data_string *kept = (data_string *)array_get_element(
+                hctx->keep_headers, ds->key->ptr);
+            if (NULL == kept) {
+                buffer_copy_string(ds->value, value);
+                array_insert_unique(con->response.headers, (data_unset *)ds);
+            }
         }
+    }
+
+    for (i = 0; i < hctx->keep_headers->used; i++) {
+        data_string *ds = (data_string *)hctx->keep_headers->data[i];
+        array_insert_unique(con->response.headers, data_string_copy(ds));
     }
 
     return 0;
@@ -951,10 +985,27 @@ SUBREQUEST_FUNC(mod_reproxy_subrequest) {
                             }
                         }
 
+                        hctx = handler_ctx_init();
+
+                        /* copy keep headers */
+                        if (p->conf.keep_headers->used > 0) {
+                            for (i = 0; i < p->conf.keep_headers->used; i++) {
+                                data_string *keep =
+                                    (data_string *)p->conf.keep_headers->data[i];
+                                if (keep->value->used == 0) continue;
+
+                                data_string *header = (data_string *)array_get_element(
+                                    con->response.headers, keep->value->ptr);
+
+                                if (NULL == header) continue;
+                                array_insert_unique(
+                                    hctx->keep_headers, data_string_copy(header));
+                            }
+                        }
+
                         /* reset response */
                         mod_reproxy_reset_response(con);
 
-                        hctx = handler_ctx_init();
                         if (0 != parse_url(srv, hctx, reproxy_url)) {
                             log_error_write(srv, __FILE__, __LINE__,  "sb",
                                 "invalid url:", reproxy_url);
